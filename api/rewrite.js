@@ -1,15 +1,29 @@
-import { exiftool } from 'exiftool-vendored';
 import formidable from 'formidable';
 import fs from 'fs/promises';
-import path from 'path';
+import sharp from 'sharp';
+import piexif from 'piexifjs';
 
 export const config = { api: { bodyParser: false } };
 
-export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    res.status(405).send('Use POST');
-    return;
+// helpers: Buffer <-> binary string (piexifjs работает со строкой)
+function bufferToBinaryString(buf) {
+  let binary = '';
+  const bytes = new Uint8Array(buf);
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
   }
+  return binary;
+}
+function binaryStringToBuffer(bin) {
+  const len = bin.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+  return Buffer.from(bytes.buffer);
+}
+
+export default async function handler(req, res) {
+  if (req.method !== 'POST') return res.status(405).send('Use POST');
 
   try {
     const form = formidable({ multiples: false });
@@ -19,30 +33,46 @@ export default async function handler(req, res) {
 
     const width  = Number(fields.width);
     const height = Number(fields.height);
-    const outName = (fields.outName?.toString() || 'out.jpg');
+    let outName  = (fields.outName?.toString() || 'out.jpg');
 
-    if (!files.picture) {
-      res.status(400).send('missing file field \"picture\"');
-      return;
-    }
-    if (!Number.isFinite(width) || !Number.isFinite(height)) {
-      res.status(400).send('width/height must be numbers');
-      return;
-    }
+    if (!files.picture) return res.status(400).send('missing file "picture"');
+    if (!Number.isFinite(width) || !Number.isFinite(height)) return res.status(400).send('width/height must be numbers');
 
     const file = Array.isArray(files.picture) ? files.picture[0] : files.picture;
-    const inPath = file.filepath;
-    const outPath = path.join(path.dirname(inPath), `exif_${Date.now()}_${outName}`);
+    const inBuf = await fs.readFile(file.filepath);
 
-    await exiftool.write(inPath, { ExifImageWidth: width, ExifImageHeight: height }, outPath);
+    // Приводим к JPEG (piexifjs пишет EXIF только в JPEG)
+    // Если имя не .jpg/.jpeg — заменим расширение
+    if (!/\.jpe?g$/i.test(outName)) outName = outName.replace(/\.\w+$/i, '') + '.jpg';
 
-    const buf = await fs.readFile(outPath);
+    let jpegBuffer;
+    const meta = await sharp(inBuf).metadata();
+    if (meta.format !== 'jpeg') {
+      jpegBuffer = await sharp(inBuf).jpeg({ quality: 95 }).toBuffer();
+    } else {
+      jpegBuffer = inBuf;
+    }
+
+    // Читаем как binary string -> пишем EXIF -> обратно в Buffer
+    const bin = bufferToBinaryString(jpegBuffer);
+
+    let exifObj;
+    try {
+      exifObj = piexif.load(bin);
+    } catch {
+      exifObj = { "0th": {}, "Exif": {}, "GPS": {}, "Interop": {}, "1st": {}, "thumbnail": null };
+    }
+    exifObj.Exif[piexif.ExifIFD.PixelXDimension] = width;   // ExifImageWidth
+    exifObj.Exif[piexif.ExifIFD.PixelYDimension] = height;  // ExifImageHeight
+
+    const exifBytes = piexif.dump(exifObj);
+    const withExif = piexif.insert(exifBytes, bin);
+    const outBuffer = binaryStringToBuffer(withExif);
+
     res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', `attachment; filename=\"${outName}\"`);
-    res.status(200).end(buf);
-
-    try { await fs.unlink(outPath); } catch {}
+    res.setHeader('Content-Disposition', `attachment; filename="${outName}"`);
+    return res.status(200).end(outBuffer);
   } catch (e) {
-    res.status(500).send(String(e));
+    return res.status(500).send(String(e));
   }
 }
