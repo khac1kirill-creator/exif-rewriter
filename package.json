@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
-     "exiftool-vendored": "latest",
-     "formidable": "^3.5.4"
+    "formidable": "^3.5.4",
+    "sharp": "^0.33.4",
+    "piexifjs": "^1.0.6"
   }
 }
