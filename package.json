@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "exiftool-vendored": "^27.3.0",
-    "formidable": "^3.5.4"
+     "exiftool-vendored": "latest",
+     "formidable": "^3.5.4"
   }
 }
